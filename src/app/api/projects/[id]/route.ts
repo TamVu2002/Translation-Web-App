@@ -46,32 +46,63 @@ export async function DELETE(
       .eq('project_id', projectId);
 
     // 4. Delete media files from storage
+    const deletedMedia: string[] = [];
+    const failedMedia: string[] = [];
+    
     if (mediaFiles && mediaFiles.length > 0) {
       for (const file of mediaFiles) {
-        try {
-          await adminClient.storage
+        if (file.storage_bucket && file.storage_path) {
+          const { error } = await adminClient.storage
             .from(file.storage_bucket)
             .remove([file.storage_path]);
-        } catch (e) {
-          console.warn('Failed to delete media file from storage:', e);
+          
+          if (error) {
+            console.error('Failed to delete media file:', file.storage_path, error);
+            failedMedia.push(file.storage_path);
+          } else {
+            deletedMedia.push(file.storage_path);
+          }
         }
       }
     }
 
     // 5. Delete subtitle files from storage
+    const deletedSubtitles: string[] = [];
+    const failedSubtitles: string[] = [];
+    
     if (subtitleTracks && subtitleTracks.length > 0) {
       for (const track of subtitleTracks) {
-        try {
-          await adminClient.storage
+        if (track.storage_bucket && track.storage_path) {
+          const { error } = await adminClient.storage
             .from(track.storage_bucket)
             .remove([track.storage_path]);
-        } catch (e) {
-          console.warn('Failed to delete subtitle file from storage:', e);
+          
+          if (error) {
+            console.error('Failed to delete subtitle file:', track.storage_path, error);
+            failedSubtitles.push(track.storage_path);
+          } else {
+            deletedSubtitles.push(track.storage_path);
+          }
         }
       }
     }
+    
+    // 6. Also try to delete the project folder in storage
+    const folderPath = `${user.id}/${projectId}`;
+    try {
+      const { data: folderContents } = await adminClient.storage
+        .from('media')
+        .list(folderPath);
+      
+      if (folderContents && folderContents.length > 0) {
+        const filesToDelete = folderContents.map(f => `${folderPath}/${f.name}`);
+        await adminClient.storage.from('media').remove(filesToDelete);
+      }
+    } catch (e) {
+      console.warn('Could not clean up folder:', e);
+    }
 
-    // 6. Delete project (CASCADE will delete related records)
+    // 7. Delete project (CASCADE will delete related records)
     const { error: deleteError } = await adminClient
       .from('projects')
       .delete()
@@ -81,16 +112,14 @@ export async function DELETE(
       throw deleteError;
     }
 
-    // 7. Clear any server-side cache if needed
-    // In Next.js, we can use revalidatePath or revalidateTag
-    // For now, we'll just return success and let client handle refresh
-
     return NextResponse.json({ 
       success: true, 
       message: 'Project and all associated files deleted successfully',
       deletedFiles: {
-        media: mediaFiles?.length || 0,
-        subtitles: subtitleTracks?.length || 0,
+        media: deletedMedia.length,
+        subtitles: deletedSubtitles.length,
+        failedMedia: failedMedia.length,
+        failedSubtitles: failedSubtitles.length,
       }
     });
 
