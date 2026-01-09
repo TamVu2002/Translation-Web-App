@@ -23,11 +23,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate file size (500MB max)
-    const maxSize = 500 * 1024 * 1024;
+    // Validate file size (50MB max for Supabase Free tier)
+    // Upgrade to Pro tier for up to 5GB per file
+    const maxSize = 50 * 1024 * 1024;
     if (fileSize > maxSize) {
       return NextResponse.json(
-        { error: 'File too large. Maximum size is 500MB.' },
+        { error: 'File quá lớn. Giới hạn tối đa là 50MB (Supabase Free tier). Nâng cấp lên Pro để upload file đến 5GB.' },
         { status: 400 }
       );
     }

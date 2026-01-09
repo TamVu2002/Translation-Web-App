@@ -18,7 +18,8 @@ interface UploadDropzoneProps {
 
 type UploadStatus = 'idle' | 'uploading' | 'processing' | 'complete' | 'error';
 
-const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500MB
+// Supabase Free tier limit is 50MB, Pro tier is 5GB
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB for Free tier
 const ACCEPTED_TYPES = {
   'audio/mpeg': ['.mp3'],
   'audio/wav': ['.wav'],
@@ -200,7 +201,7 @@ export function UploadDropzone({
 
   const onDrop = useCallback((acceptedFiles: File[], rejectedFiles: unknown[]) => {
     if (rejectedFiles.length > 0) {
-      setErrorMessage('File không hợp lệ hoặc quá lớn. Tối đa 500MB, chỉ hỗ trợ MP3/MP4/WAV/WebM.');
+      setErrorMessage('File không hợp lệ hoặc quá lớn. Tối đa 50MB, chỉ hỗ trợ MP3/MP4/WAV/WebM.');
       return;
     }
 
@@ -272,7 +273,7 @@ export function UploadDropzone({
               <span className="text-muted-foreground/50">•</span>
               <span>🎬 MP4, WebM, MOV</span>
               <span className="text-muted-foreground/50">•</span>
-              <span>Tối đa 500MB</span>
+              <span>Tối đa 50MB</span>
             </div>
           </div>
         )}
