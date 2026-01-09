@@ -41,98 +41,6 @@ export function UploadDropzone({
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Large file threshold: 50MB - use TUS resumable upload
-  const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
-
-  const uploadLargeFile = async (file: File, storagePath: string): Promise<void> => {
-    // Dynamic import tus-js-client
-    const tus = await import('tus-js-client');
-    const { createBrowserClient } = await import('@supabase/ssr');
-    
-    const supabase = createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-    );
-    
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.access_token) {
-      throw new Error('Không có phiên đăng nhập');
-    }
-
-    // Extract project ID from Supabase URL
-    // https://lljviuzkrdibifflvtod.supabase.co -> lljviuzkrdibifflvtod
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-    const projectId = supabaseUrl.replace('https://', '').split('.')[0];
-
-    return new Promise((resolve, reject) => {
-      const upload = new tus.Upload(file, {
-        // Use DIRECT storage hostname for better performance
-        endpoint: `https://${projectId}.supabase.co/storage/v1/upload/resumable`,
-        retryDelays: [0, 3000, 5000, 10000, 20000],
-        headers: {
-          authorization: `Bearer ${session.access_token}`,
-          'x-upsert': 'false',
-        },
-        uploadDataDuringCreation: true,
-        removeFingerprintOnSuccess: true,
-        metadata: {
-          bucketName: 'media',
-          objectName: storagePath,
-          contentType: file.type,
-          cacheControl: '3600',
-        },
-        chunkSize: 6 * 1024 * 1024, // Must be 6MB for Supabase
-        onError: (error) => {
-          console.error('TUS upload error:', error);
-          reject(new Error(`Upload thất bại: ${error.message}`));
-        },
-        onProgress: (bytesUploaded, bytesTotal) => {
-          const percentage = Math.round((bytesUploaded / bytesTotal) * 100);
-          setUploadProgress(percentage);
-        },
-        onSuccess: () => {
-          resolve();
-        },
-      });
-
-      // Check for previous upload to resume
-      upload.findPreviousUploads().then((previousUploads) => {
-        if (previousUploads.length > 0) {
-          upload.resumeFromPreviousUpload(previousUploads[0]);
-        }
-        upload.start();
-      });
-    });
-  };
-
-  const uploadDirect = async (file: File, signedUrl: string): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      
-      xhr.upload.addEventListener('progress', (event) => {
-        if (event.lengthComputable) {
-          const percent = Math.round((event.loaded / event.total) * 100);
-          setUploadProgress(percent);
-        }
-      });
-
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve();
-        } else {
-          reject(new Error(`Upload failed with status ${xhr.status}`));
-        }
-      });
-
-      xhr.addEventListener('error', () => reject(new Error('Upload failed')));
-      xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
-
-      xhr.open('PUT', signedUrl);
-      xhr.setRequestHeader('Content-Type', file.type);
-      xhr.send(file);
-    });
-  };
-
   const uploadFile = async (file: File) => {
     setUploadStatus('uploading');
     setUploadProgress(0);
@@ -158,14 +66,32 @@ export function UploadDropzone({
 
       const { signedUrl, storagePath, mediaFileId } = await signedUrlResponse.json();
 
-      // 2. Upload file based on size
-      if (file.size > LARGE_FILE_THRESHOLD) {
-        // Use TUS resumable upload for large files
-        await uploadLargeFile(file, storagePath);
-      } else {
-        // Use direct upload for small files
-        await uploadDirect(file, signedUrl);
-      }
+      // 2. Upload file directly with XHR
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        
+        xhr.upload.addEventListener('progress', (event) => {
+          if (event.lengthComputable) {
+            const percent = Math.round((event.loaded / event.total) * 100);
+            setUploadProgress(percent);
+          }
+        });
+
+        xhr.addEventListener('load', () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve();
+          } else {
+            reject(new Error(`Upload failed with status ${xhr.status}`));
+          }
+        });
+
+        xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+        xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
+
+        xhr.open('PUT', signedUrl);
+        xhr.setRequestHeader('Content-Type', file.type);
+        xhr.send(file);
+      });
 
       // 3. Confirm upload and create database record
       setUploadStatus('processing');

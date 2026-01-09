@@ -24,11 +24,10 @@ export async function POST(request: NextRequest) {
     }
 
     // Validate file size (50MB max for Supabase Free tier)
-    // Upgrade to Pro tier for up to 5GB per file
     const maxSize = 50 * 1024 * 1024;
     if (fileSize > maxSize) {
       return NextResponse.json(
-        { error: 'File quá lớn. Giới hạn tối đa là 50MB (Supabase Free tier). Nâng cấp lên Pro để upload file đến 5GB.' },
+        { error: 'File quá lớn. Giới hạn tối đa là 50MB. Hãy nén video hoặc cắt thành đoạn ngắn hơn.' },
         { status: 400 }
       );
     }
@@ -46,7 +45,7 @@ export async function POST(request: NextRequest) {
     
     if (!allowedTypes.includes(contentType)) {
       return NextResponse.json(
-        { error: 'Invalid file type. Allowed: MP3, WAV, M4A, MP4, WebM, MOV' },
+        { error: 'Định dạng không hỗ trợ. Chỉ chấp nhận: MP3, WAV, M4A, MP4, WebM, MOV' },
         { status: 400 }
       );
     }
@@ -71,40 +70,9 @@ export async function POST(request: NextRequest) {
     const sanitizedFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
     const storagePath = `${user.id}/${projectId}/${mediaFileId}-${sanitizedFilename}`;
 
-    // Create signed upload URL using admin client
+    // Create signed upload URL
     const adminClient = createAdminClient();
     
-    // For large files (>50MB), use resumable upload
-    const isLargeFile = fileSize > 50 * 1024 * 1024;
-    
-    if (isLargeFile) {
-      // Create resumable upload URL with longer expiration (2 hours)
-      const { data: uploadData, error: uploadError } = await adminClient
-        .storage
-        .from('media')
-        .createSignedUploadUrl(storagePath, {
-          upsert: false,
-        });
-
-      if (uploadError || !uploadData) {
-        console.error('Resumable upload error:', uploadError);
-        return NextResponse.json(
-          { error: 'Failed to create upload URL' },
-          { status: 500 }
-        );
-      }
-
-      return NextResponse.json({
-        signedUrl: uploadData.signedUrl,
-        storagePath,
-        mediaFileId,
-        token: uploadData.token,
-        isResumable: true,
-        bucket: 'media',
-      });
-    }
-    
-    // For smaller files, use regular signed URL
     const { data: signedUrlData, error: signedUrlError } = await adminClient
       .storage
       .from('media')
