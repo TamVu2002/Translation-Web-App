@@ -7,6 +7,8 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
+import * as tus from 'tus-js-client';
+import { createBrowserClient } from '@supabase/ssr';
 
 interface UploadDropzoneProps {
   projectId: string;
@@ -40,6 +42,88 @@ export function UploadDropzone({
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Large file threshold: 50MB
+  const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
+
+  const uploadLargeFile = async (file: File, storagePath: string, mediaFileId: string): Promise<void> => {
+    const supabase = createBrowserClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+    
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) {
+      throw new Error('Không có phiên đăng nhập');
+    }
+
+    return new Promise((resolve, reject) => {
+      const upload = new tus.Upload(file, {
+        endpoint: `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/upload/resumable`,
+        retryDelays: [0, 3000, 5000, 10000, 20000],
+        headers: {
+          authorization: `Bearer ${session.access_token}`,
+          'x-upsert': 'false',
+        },
+        uploadDataDuringCreation: true,
+        removeFingerprintOnSuccess: true,
+        metadata: {
+          bucketName: 'media',
+          objectName: storagePath,
+          contentType: file.type,
+          cacheControl: '3600',
+        },
+        chunkSize: 6 * 1024 * 1024, // 6MB chunks
+        onError: (error) => {
+          console.error('TUS upload error:', error);
+          reject(new Error(`Upload thất bại: ${error.message}`));
+        },
+        onProgress: (bytesUploaded, bytesTotal) => {
+          const percentage = Math.round((bytesUploaded / bytesTotal) * 100);
+          setUploadProgress(percentage);
+        },
+        onSuccess: () => {
+          resolve();
+        },
+      });
+
+      // Check for previous upload to resume
+      upload.findPreviousUploads().then((previousUploads) => {
+        if (previousUploads.length > 0) {
+          upload.resumeFromPreviousUpload(previousUploads[0]);
+        }
+        upload.start();
+      });
+    });
+  };
+
+  const uploadSmallFile = async (file: File, signedUrl: string): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress(percent);
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          reject(new Error(`Upload failed with status ${xhr.status}`));
+        }
+      });
+
+      xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+      xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
+
+      xhr.open('PUT', signedUrl);
+      xhr.setRequestHeader('Content-Type', file.type);
+      xhr.send(file);
+    });
+  };
+
   const uploadFile = async (file: File) => {
     setUploadStatus('uploading');
     setUploadProgress(0);
@@ -63,39 +147,16 @@ export function UploadDropzone({
         throw new Error(error.error || 'Failed to get upload URL');
       }
 
-      const { signedUrl, storagePath, mediaFileId } = await signedUrlResponse.json();
+      const { signedUrl, storagePath, mediaFileId, isResumable } = await signedUrlResponse.json();
 
-      // 2. Upload file with progress tracking using XHR
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable) {
-            const percent = Math.round((event.loaded / event.total) * 100);
-            setUploadProgress(percent);
-          }
-        });
-
-        xhr.addEventListener('load', () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve();
-          } else {
-            reject(new Error(`Upload failed with status ${xhr.status}`));
-          }
-        });
-
-        xhr.addEventListener('error', () => {
-          reject(new Error('Upload failed'));
-        });
-
-        xhr.addEventListener('abort', () => {
-          reject(new Error('Upload aborted'));
-        });
-
-        xhr.open('PUT', signedUrl);
-        xhr.setRequestHeader('Content-Type', file.type);
-        xhr.send(file);
-      });
+      // 2. Upload file based on size
+      if (file.size > LARGE_FILE_THRESHOLD || isResumable) {
+        // Use TUS resumable upload for large files
+        await uploadLargeFile(file, storagePath, mediaFileId);
+      } else {
+        // Use simple XHR for small files
+        await uploadSmallFile(file, signedUrl);
+      }
 
       // 3. Confirm upload and create database record
       setUploadStatus('processing');

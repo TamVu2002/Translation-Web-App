@@ -73,6 +73,37 @@ export async function POST(request: NextRequest) {
     // Create signed upload URL using admin client
     const adminClient = createAdminClient();
     
+    // For large files (>50MB), use resumable upload
+    const isLargeFile = fileSize > 50 * 1024 * 1024;
+    
+    if (isLargeFile) {
+      // Create resumable upload URL with longer expiration (2 hours)
+      const { data: uploadData, error: uploadError } = await adminClient
+        .storage
+        .from('media')
+        .createSignedUploadUrl(storagePath, {
+          upsert: false,
+        });
+
+      if (uploadError || !uploadData) {
+        console.error('Resumable upload error:', uploadError);
+        return NextResponse.json(
+          { error: 'Failed to create upload URL' },
+          { status: 500 }
+        );
+      }
+
+      return NextResponse.json({
+        signedUrl: uploadData.signedUrl,
+        storagePath,
+        mediaFileId,
+        token: uploadData.token,
+        isResumable: true,
+        bucket: 'media',
+      });
+    }
+    
+    // For smaller files, use regular signed URL
     const { data: signedUrlData, error: signedUrlError } = await adminClient
       .storage
       .from('media')
