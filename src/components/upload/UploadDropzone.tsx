@@ -7,8 +7,6 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
-import * as tus from 'tus-js-client';
-import { createBrowserClient } from '@supabase/ssr';
 
 interface UploadDropzoneProps {
   projectId: string;
@@ -42,10 +40,14 @@ export function UploadDropzone({
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Large file threshold: 50MB
+  // Large file threshold: 50MB - use TUS resumable upload
   const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
 
-  const uploadLargeFile = async (file: File, storagePath: string, mediaFileId: string): Promise<void> => {
+  const uploadLargeFile = async (file: File, storagePath: string): Promise<void> => {
+    // Dynamic import tus-js-client
+    const tus = await import('tus-js-client');
+    const { createBrowserClient } = await import('@supabase/ssr');
+    
     const supabase = createBrowserClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -56,9 +58,15 @@ export function UploadDropzone({
       throw new Error('Không có phiên đăng nhập');
     }
 
+    // Extract project ID from Supabase URL
+    // https://lljviuzkrdibifflvtod.supabase.co -> lljviuzkrdibifflvtod
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    const projectId = supabaseUrl.replace('https://', '').split('.')[0];
+
     return new Promise((resolve, reject) => {
       const upload = new tus.Upload(file, {
-        endpoint: `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/upload/resumable`,
+        // Use DIRECT storage hostname for better performance
+        endpoint: `https://${projectId}.supabase.co/storage/v1/upload/resumable`,
         retryDelays: [0, 3000, 5000, 10000, 20000],
         headers: {
           authorization: `Bearer ${session.access_token}`,
@@ -72,7 +80,7 @@ export function UploadDropzone({
           contentType: file.type,
           cacheControl: '3600',
         },
-        chunkSize: 6 * 1024 * 1024, // 6MB chunks
+        chunkSize: 6 * 1024 * 1024, // Must be 6MB for Supabase
         onError: (error) => {
           console.error('TUS upload error:', error);
           reject(new Error(`Upload thất bại: ${error.message}`));
@@ -96,7 +104,7 @@ export function UploadDropzone({
     });
   };
 
-  const uploadSmallFile = async (file: File, signedUrl: string): Promise<void> => {
+  const uploadDirect = async (file: File, signedUrl: string): Promise<void> => {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       
@@ -147,15 +155,15 @@ export function UploadDropzone({
         throw new Error(error.error || 'Failed to get upload URL');
       }
 
-      const { signedUrl, storagePath, mediaFileId, isResumable } = await signedUrlResponse.json();
+      const { signedUrl, storagePath, mediaFileId } = await signedUrlResponse.json();
 
       // 2. Upload file based on size
-      if (file.size > LARGE_FILE_THRESHOLD || isResumable) {
+      if (file.size > LARGE_FILE_THRESHOLD) {
         // Use TUS resumable upload for large files
-        await uploadLargeFile(file, storagePath, mediaFileId);
+        await uploadLargeFile(file, storagePath);
       } else {
-        // Use simple XHR for small files
-        await uploadSmallFile(file, signedUrl);
+        // Use direct upload for small files
+        await uploadDirect(file, signedUrl);
       }
 
       // 3. Confirm upload and create database record
