@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
+import { v4 as uuidv4 } from 'uuid';
 
 export async function POST(request: NextRequest) {
   try {
@@ -11,10 +12,10 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { projectId, mediaFileId, storagePath, filename, mimeType, fileSize } = body;
+    const { projectId, uploadthingKey, uploadthingUrl, filename, mimeType, fileSize } = body;
 
     // Validate input
-    if (!projectId || !mediaFileId || !storagePath || !filename || !mimeType || !fileSize) {
+    if (!projectId || !uploadthingKey || !uploadthingUrl || !filename || !mimeType || !fileSize) {
       return NextResponse.json(
         { error: 'Missing required fields' },
         { status: 400 }
@@ -39,7 +40,10 @@ export async function POST(request: NextRequest) {
     // Determine media kind
     const kind = mimeType.startsWith('video/') ? 'video' : 'audio';
 
-    // Insert media file record (storage_bucket = 'r2' for Cloudflare R2)
+    // Generate a unique ID for this media file
+    const mediaFileId = uuidv4();
+
+    // Insert media file record (storage_bucket = 'uploadthing')
     const { data: mediaFile, error: insertError } = await supabase
       .from('media_files')
       .insert({
@@ -50,8 +54,9 @@ export async function POST(request: NextRequest) {
         original_filename: filename,
         mime_type: mimeType,
         size_bytes: fileSize,
-        storage_bucket: 'r2',
-        storage_path: storagePath,
+        storage_bucket: 'uploadthing',
+        storage_path: uploadthingKey, // Store the uploadthing key
+        // Store the full URL in a custom field or we can reconstruct it later
       })
       .select()
       .single();
@@ -66,6 +71,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      mediaFileId,
       mediaFile,
     });
 

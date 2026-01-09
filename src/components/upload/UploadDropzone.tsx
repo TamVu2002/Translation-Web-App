@@ -7,6 +7,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
+import { useUploadThing } from '@/lib/uploadthing/client';
 
 interface UploadDropzoneProps {
   projectId: string;
@@ -18,8 +19,8 @@ interface UploadDropzoneProps {
 
 type UploadStatus = 'idle' | 'uploading' | 'processing' | 'complete' | 'error';
 
-// Cloudflare R2 supports up to 5GB, we limit to 500MB for practicality
-const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500MB
+// Uploadthing Free: 512MB per file
+const MAX_FILE_SIZE = 512 * 1024 * 1024; // 512MB
 const ACCEPTED_TYPES = {
   'audio/mpeg': ['.mp3'],
   'audio/wav': ['.wav'],
@@ -41,102 +42,73 @@ export function UploadDropzone({
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const uploadFile = async (file: File) => {
-    setUploadStatus('uploading');
-    setUploadProgress(0);
-    setErrorMessage(null);
-
-    try {
-      // 1. Get signed upload URL from server
-      const signedUrlResponse = await fetch('/api/upload/signed-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId,
-          filename: file.name,
-          contentType: file.type,
-          fileSize: file.size,
-        }),
-      });
-
-      if (!signedUrlResponse.ok) {
-        const error = await signedUrlResponse.json();
-        throw new Error(error.error || 'Failed to get upload URL');
-      }
-
-      const { signedUrl, storagePath, mediaFileId } = await signedUrlResponse.json();
-
-      // 2. Upload file directly with XHR
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
+  const { startUpload, isUploading } = useUploadThing('mediaUploader', {
+    onUploadProgress: (progress) => {
+      setUploadProgress(progress);
+    },
+    onClientUploadComplete: async (res) => {
+      if (res && res[0]) {
+        const uploadedFile = res[0];
         
-        xhr.upload.addEventListener('progress', (event) => {
-          if (event.lengthComputable) {
-            const percent = Math.round((event.loaded / event.total) * 100);
-            setUploadProgress(percent);
+        // Save to database
+        setUploadStatus('processing');
+        
+        try {
+          const confirmResponse = await fetch('/api/upload/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              projectId,
+              uploadthingKey: uploadedFile.key,
+              uploadthingUrl: uploadedFile.ufsUrl,
+              filename: uploadedFile.name,
+              mimeType: selectedFile?.type || 'video/mp4',
+              fileSize: uploadedFile.size,
+            }),
+          });
+
+          if (!confirmResponse.ok) {
+            const error = await confirmResponse.json();
+            throw new Error(error.error || 'Failed to save file record');
           }
-        });
 
-        xhr.addEventListener('load', () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve();
-          } else {
-            reject(new Error(`Upload failed with status ${xhr.status}`));
-          }
-        });
-
-        xhr.addEventListener('error', () => reject(new Error('Upload failed')));
-        xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
-
-        xhr.open('PUT', signedUrl);
-        xhr.setRequestHeader('Content-Type', file.type);
-        xhr.send(file);
-      });
-
-      // 3. Confirm upload and create database record
-      setUploadStatus('processing');
-      
-      const confirmResponse = await fetch('/api/upload/confirm', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectId,
-          mediaFileId,
-          storagePath,
-          filename: file.name,
-          mimeType: file.type,
-          fileSize: file.size,
-        }),
-      });
-
-      if (!confirmResponse.ok) {
-        const error = await confirmResponse.json();
-        throw new Error(error.error || 'Failed to confirm upload');
+          const { mediaFileId } = await confirmResponse.json();
+          setUploadStatus('complete');
+          onUploadComplete(mediaFileId);
+        } catch (err) {
+          console.error('Confirm error:', err);
+          const message = err instanceof Error ? err.message : 'Failed to save file';
+          setErrorMessage(message);
+          setUploadStatus('error');
+          onError(message);
+        }
       }
-
-      setUploadStatus('complete');
-      onUploadComplete(mediaFileId);
-    } catch (err) {
-      console.error('Upload error:', err);
-      const message = err instanceof Error ? err.message : 'Upload failed';
-      setErrorMessage(message);
+    },
+    onUploadError: (error) => {
+      console.error('Upload error:', error);
+      setErrorMessage(error.message || 'Upload failed');
       setUploadStatus('error');
-      onError(message);
-    }
-  };
+      onError(error.message || 'Upload failed');
+    },
+  });
 
   const onDrop = useCallback((acceptedFiles: File[], rejectedFiles: unknown[]) => {
     if (rejectedFiles.length > 0) {
-      setErrorMessage('File không hợp lệ hoặc quá lớn. Tối đa 500MB, chỉ hỗ trợ MP3/MP4/WAV/WebM.');
+      setErrorMessage('File không hợp lệ hoặc quá lớn. Tối đa 512MB, chỉ hỗ trợ MP3/MP4/WAV/WebM.');
       return;
     }
 
     if (acceptedFiles.length > 0) {
       const file = acceptedFiles[0];
       setSelectedFile(file);
-      uploadFile(file);
+      setUploadStatus('uploading');
+      setUploadProgress(0);
+      setErrorMessage(null);
+      
+      // Start Uploadthing upload
+      startUpload([file]);
     }
-  }, [projectId, userId]);
+  }, [startUpload]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -199,7 +171,7 @@ export function UploadDropzone({
               <span className="text-muted-foreground/50">•</span>
               <span>🎬 MP4, WebM, MOV</span>
               <span className="text-muted-foreground/50">•</span>
-              <span>Tối đa 500MB</span>
+              <span>Tối đa 512MB</span>
             </div>
           </div>
         )}

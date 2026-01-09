@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { deleteFile as deleteR2File } from '@/lib/storage/r2';
+import { UTApi } from 'uploadthing/server';
+
+const utapi = new UTApi();
 
 export async function DELETE(
   request: NextRequest,
@@ -46,7 +48,7 @@ export async function DELETE(
       .select('storage_bucket, storage_path')
       .eq('project_id', projectId);
 
-    // 4. Delete media files from storage (R2 or Supabase)
+    // 4. Delete media files from storage (Uploadthing or Supabase)
     const deletedMedia: string[] = [];
     const failedMedia: string[] = [];
     
@@ -54,9 +56,9 @@ export async function DELETE(
       for (const file of mediaFiles) {
         if (file.storage_bucket && file.storage_path) {
           try {
-            if (file.storage_bucket === 'r2') {
-              // Delete from Cloudflare R2
-              await deleteR2File(file.storage_path);
+            if (file.storage_bucket === 'uploadthing') {
+              // Delete from Uploadthing
+              await utapi.deleteFiles(file.storage_path);
             } else {
               // Delete from Supabase Storage (legacy)
               await adminClient.storage

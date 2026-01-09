@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { createDownloadUrl } from '@/lib/storage/r2';
+import { UTApi } from 'uploadthing/server';
+
+const utapi = new UTApi();
 
 export async function GET(request: NextRequest) {
   try {
@@ -51,11 +53,12 @@ export async function GET(request: NextRequest) {
     const adminClient = createAdminClient();
     const expiresIn = 3600; // 1 hour
 
-    // Media URL - check if stored in R2 or Supabase
+    // Media URL - check storage provider
     let mediaUrl = null;
-    if (mediaFile.storage_bucket === 'r2') {
-      // Use Cloudflare R2
-      mediaUrl = await createDownloadUrl(mediaFile.storage_path, expiresIn);
+    if (mediaFile.storage_bucket === 'uploadthing') {
+      // Use Uploadthing - construct URL from key
+      // Uploadthing URLs are public and don't need signing
+      mediaUrl = `https://utfs.io/f/${mediaFile.storage_path}`;
     } else {
       // Use Supabase Storage (legacy)
       const { data: mediaUrlData } = await adminClient
