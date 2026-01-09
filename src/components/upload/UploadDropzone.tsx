@@ -7,7 +7,6 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
-import { useUploadThing } from '@/lib/uploadthing/client';
 
 interface UploadDropzoneProps {
   projectId: string;
@@ -19,8 +18,8 @@ interface UploadDropzoneProps {
 
 type UploadStatus = 'idle' | 'uploading' | 'processing' | 'complete' | 'error';
 
-// Uploadthing Free: 512MB per file
-const MAX_FILE_SIZE = 512 * 1024 * 1024; // 512MB
+// Supabase Free tier limit is 50MB, Pro tier is 5GB
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB for Free tier
 const ACCEPTED_TYPES = {
   'audio/mpeg': ['.mp3'],
   'audio/wav': ['.wav'],
@@ -42,73 +41,176 @@ export function UploadDropzone({
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const { startUpload, isUploading } = useUploadThing('mediaUploader', {
-    onUploadProgress: (progress) => {
-      setUploadProgress(progress);
-    },
-    onClientUploadComplete: async (res) => {
-      if (res && res[0]) {
-        const uploadedFile = res[0];
-        
-        // Save to database
-        setUploadStatus('processing');
-        
-        try {
-          const confirmResponse = await fetch('/api/upload/confirm', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              projectId,
-              uploadthingKey: uploadedFile.key,
-              uploadthingUrl: uploadedFile.ufsUrl,
-              filename: uploadedFile.name,
-              mimeType: selectedFile?.type || 'video/mp4',
-              fileSize: uploadedFile.size,
-            }),
-          });
+  // Large file threshold: 50MB - use TUS resumable upload
+  const LARGE_FILE_THRESHOLD = 50 * 1024 * 1024;
 
-          if (!confirmResponse.ok) {
-            const error = await confirmResponse.json();
-            throw new Error(error.error || 'Failed to save file record');
-          }
+  const uploadLargeFile = async (file: File, storagePath: string): Promise<void> => {
+    // Dynamic import tus-js-client
+    const tus = await import('tus-js-client');
+    const { createBrowserClient } = await import('@supabase/ssr');
+    
+    const supabase = createBrowserClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    );
+    
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.access_token) {
+      throw new Error('Không có phiên đăng nhập');
+    }
 
-          const { mediaFileId } = await confirmResponse.json();
-          setUploadStatus('complete');
-          onUploadComplete(mediaFileId);
-        } catch (err) {
-          console.error('Confirm error:', err);
-          const message = err instanceof Error ? err.message : 'Failed to save file';
-          setErrorMessage(message);
-          setUploadStatus('error');
-          onError(message);
+    // Extract project ID from Supabase URL
+    // https://lljviuzkrdibifflvtod.supabase.co -> lljviuzkrdibifflvtod
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    const projectId = supabaseUrl.replace('https://', '').split('.')[0];
+
+    return new Promise((resolve, reject) => {
+      const upload = new tus.Upload(file, {
+        // Use DIRECT storage hostname for better performance
+        endpoint: `https://${projectId}.supabase.co/storage/v1/upload/resumable`,
+        retryDelays: [0, 3000, 5000, 10000, 20000],
+        headers: {
+          authorization: `Bearer ${session.access_token}`,
+          'x-upsert': 'false',
+        },
+        uploadDataDuringCreation: true,
+        removeFingerprintOnSuccess: true,
+        metadata: {
+          bucketName: 'media',
+          objectName: storagePath,
+          contentType: file.type,
+          cacheControl: '3600',
+        },
+        chunkSize: 6 * 1024 * 1024, // Must be 6MB for Supabase
+        onError: (error) => {
+          console.error('TUS upload error:', error);
+          reject(new Error(`Upload thất bại: ${error.message}`));
+        },
+        onProgress: (bytesUploaded, bytesTotal) => {
+          const percentage = Math.round((bytesUploaded / bytesTotal) * 100);
+          setUploadProgress(percentage);
+        },
+        onSuccess: () => {
+          resolve();
+        },
+      });
+
+      // Check for previous upload to resume
+      upload.findPreviousUploads().then((previousUploads) => {
+        if (previousUploads.length > 0) {
+          upload.resumeFromPreviousUpload(previousUploads[0]);
         }
+        upload.start();
+      });
+    });
+  };
+
+  const uploadDirect = async (file: File, signedUrl: string): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.round((event.loaded / event.total) * 100);
+          setUploadProgress(percent);
+        }
+      });
+
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          reject(new Error(`Upload failed with status ${xhr.status}`));
+        }
+      });
+
+      xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+      xhr.addEventListener('abort', () => reject(new Error('Upload aborted')));
+
+      xhr.open('PUT', signedUrl);
+      xhr.setRequestHeader('Content-Type', file.type);
+      xhr.send(file);
+    });
+  };
+
+  const uploadFile = async (file: File) => {
+    setUploadStatus('uploading');
+    setUploadProgress(0);
+    setErrorMessage(null);
+
+    try {
+      // 1. Get signed upload URL from server
+      const signedUrlResponse = await fetch('/api/upload/signed-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId,
+          filename: file.name,
+          contentType: file.type,
+          fileSize: file.size,
+        }),
+      });
+
+      if (!signedUrlResponse.ok) {
+        const error = await signedUrlResponse.json();
+        throw new Error(error.error || 'Failed to get upload URL');
       }
-    },
-    onUploadError: (error) => {
-      console.error('Upload error:', error);
-      setErrorMessage(error.message || 'Upload failed');
+
+      const { signedUrl, storagePath, mediaFileId } = await signedUrlResponse.json();
+
+      // 2. Upload file based on size
+      if (file.size > LARGE_FILE_THRESHOLD) {
+        // Use TUS resumable upload for large files
+        await uploadLargeFile(file, storagePath);
+      } else {
+        // Use direct upload for small files
+        await uploadDirect(file, signedUrl);
+      }
+
+      // 3. Confirm upload and create database record
+      setUploadStatus('processing');
+      
+      const confirmResponse = await fetch('/api/upload/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId,
+          mediaFileId,
+          storagePath,
+          filename: file.name,
+          mimeType: file.type,
+          fileSize: file.size,
+        }),
+      });
+
+      if (!confirmResponse.ok) {
+        const error = await confirmResponse.json();
+        throw new Error(error.error || 'Failed to confirm upload');
+      }
+
+      setUploadStatus('complete');
+      onUploadComplete(mediaFileId);
+    } catch (err) {
+      console.error('Upload error:', err);
+      const message = err instanceof Error ? err.message : 'Upload failed';
+      setErrorMessage(message);
       setUploadStatus('error');
-      onError(error.message || 'Upload failed');
-    },
-  });
+      onError(message);
+    }
+  };
 
   const onDrop = useCallback((acceptedFiles: File[], rejectedFiles: unknown[]) => {
     if (rejectedFiles.length > 0) {
-      setErrorMessage('File không hợp lệ hoặc quá lớn. Tối đa 512MB, chỉ hỗ trợ MP3/MP4/WAV/WebM.');
+      setErrorMessage('File không hợp lệ hoặc quá lớn. Tối đa 50MB, chỉ hỗ trợ MP3/MP4/WAV/WebM.');
       return;
     }
 
     if (acceptedFiles.length > 0) {
       const file = acceptedFiles[0];
       setSelectedFile(file);
-      setUploadStatus('uploading');
-      setUploadProgress(0);
-      setErrorMessage(null);
-      
-      // Start Uploadthing upload
-      startUpload([file]);
+      uploadFile(file);
     }
-  }, [startUpload]);
+  }, [projectId, userId]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -171,7 +273,7 @@ export function UploadDropzone({
               <span className="text-muted-foreground/50">•</span>
               <span>🎬 MP4, WebM, MOV</span>
               <span className="text-muted-foreground/50">•</span>
-              <span>Tối đa 512MB</span>
+              <span>Tối đa 50MB</span>
             </div>
           </div>
         )}

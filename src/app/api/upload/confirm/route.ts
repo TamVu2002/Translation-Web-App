@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
-import { v4 as uuidv4 } from 'uuid';
+import { createAdminClient } from '@/lib/supabase/admin';
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,10 +12,10 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { projectId, uploadthingKey, uploadthingUrl, filename, mimeType, fileSize } = body;
+    const { projectId, mediaFileId, storagePath, filename, mimeType, fileSize } = body;
 
     // Validate input
-    if (!projectId || !uploadthingKey || !uploadthingUrl || !filename || !mimeType || !fileSize) {
+    if (!projectId || !mediaFileId || !storagePath || !filename || !mimeType || !fileSize) {
       return NextResponse.json(
         { error: 'Missing required fields' },
         { status: 400 }
@@ -37,13 +37,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Verify file exists in storage
+    const adminClient = createAdminClient();
+    
+    const { data: fileData, error: fileError } = await adminClient
+      .storage
+      .from('media')
+      .list(storagePath.substring(0, storagePath.lastIndexOf('/')), {
+        search: storagePath.substring(storagePath.lastIndexOf('/') + 1),
+      });
+
     // Determine media kind
     const kind = mimeType.startsWith('video/') ? 'video' : 'audio';
 
-    // Generate a unique ID for this media file
-    const mediaFileId = uuidv4();
-
-    // Insert media file record (storage_bucket = 'uploadthing')
+    // Insert media file record
     const { data: mediaFile, error: insertError } = await supabase
       .from('media_files')
       .insert({
@@ -54,9 +61,8 @@ export async function POST(request: NextRequest) {
         original_filename: filename,
         mime_type: mimeType,
         size_bytes: fileSize,
-        storage_bucket: 'uploadthing',
-        storage_path: uploadthingKey, // Store the uploadthing key
-        // Store the full URL in a custom field or we can reconstruct it later
+        storage_bucket: 'media',
+        storage_path: storagePath,
       })
       .select()
       .single();
@@ -71,7 +77,6 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      mediaFileId,
       mediaFile,
     });
 

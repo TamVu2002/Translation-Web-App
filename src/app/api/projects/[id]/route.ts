@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { UTApi } from 'uploadthing/server';
-
-const utapi = new UTApi();
 
 export async function DELETE(
   request: NextRequest,
@@ -48,33 +45,28 @@ export async function DELETE(
       .select('storage_bucket, storage_path')
       .eq('project_id', projectId);
 
-    // 4. Delete media files from storage (Uploadthing or Supabase)
+    // 4. Delete media files from storage
     const deletedMedia: string[] = [];
     const failedMedia: string[] = [];
     
     if (mediaFiles && mediaFiles.length > 0) {
       for (const file of mediaFiles) {
         if (file.storage_bucket && file.storage_path) {
-          try {
-            if (file.storage_bucket === 'uploadthing') {
-              // Delete from Uploadthing
-              await utapi.deleteFiles(file.storage_path);
-            } else {
-              // Delete from Supabase Storage (legacy)
-              await adminClient.storage
-                .from(file.storage_bucket)
-                .remove([file.storage_path]);
-            }
-            deletedMedia.push(file.storage_path);
-          } catch (error) {
+          const { error } = await adminClient.storage
+            .from(file.storage_bucket)
+            .remove([file.storage_path]);
+          
+          if (error) {
             console.error('Failed to delete media file:', file.storage_path, error);
             failedMedia.push(file.storage_path);
+          } else {
+            deletedMedia.push(file.storage_path);
           }
         }
       }
     }
 
-    // 5. Delete subtitle files from Supabase storage
+    // 5. Delete subtitle files from storage
     const deletedSubtitles: string[] = [];
     const failedSubtitles: string[] = [];
     

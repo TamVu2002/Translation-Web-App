@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { UTApi } from 'uploadthing/server';
-
-const utapi = new UTApi();
 
 export async function GET(request: NextRequest) {
   try {
@@ -50,25 +47,17 @@ export async function GET(request: NextRequest) {
     const originalTrack = tracks?.find(t => t.track_type === 'original');
     const translatedTrack = tracks?.find(t => t.track_type === 'translated');
 
+    // Create signed URLs using admin client
     const adminClient = createAdminClient();
     const expiresIn = 3600; // 1 hour
 
-    // Media URL - check storage provider
-    let mediaUrl = null;
-    if (mediaFile.storage_bucket === 'uploadthing') {
-      // Use Uploadthing - construct URL from key
-      // Uploadthing URLs are public and don't need signing
-      mediaUrl = `https://utfs.io/f/${mediaFile.storage_path}`;
-    } else {
-      // Use Supabase Storage (legacy)
-      const { data: mediaUrlData } = await adminClient
-        .storage
-        .from(mediaFile.storage_bucket)
-        .createSignedUrl(mediaFile.storage_path, expiresIn);
-      mediaUrl = mediaUrlData?.signedUrl || null;
-    }
+    // Media URL
+    const { data: mediaUrlData } = await adminClient
+      .storage
+      .from(mediaFile.storage_bucket)
+      .createSignedUrl(mediaFile.storage_path, expiresIn);
 
-    // Original track URL (subtitles still in Supabase)
+    // Original track URL
     let originalTrackUrl = null;
     if (originalTrack) {
       const { data: originalUrlData } = await adminClient
@@ -78,7 +67,7 @@ export async function GET(request: NextRequest) {
       originalTrackUrl = originalUrlData?.signedUrl || null;
     }
 
-    // Translated track URL (subtitles still in Supabase)
+    // Translated track URL
     let translatedTrackUrl = null;
     if (translatedTrack) {
       const { data: translatedUrlData } = await adminClient
@@ -89,7 +78,7 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      mediaUrl,
+      mediaUrl: mediaUrlData?.signedUrl || null,
       originalTrackUrl,
       translatedTrackUrl,
     });
