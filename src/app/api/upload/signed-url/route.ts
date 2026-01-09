@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
-import { createAdminClient } from '@/lib/supabase/admin';
+import { createUploadUrl } from '@/lib/storage/r2';
 import { v4 as uuidv4 } from 'uuid';
 
 export async function POST(request: NextRequest) {
@@ -23,11 +23,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Validate file size (50MB max for Supabase Free tier)
-    const maxSize = 50 * 1024 * 1024;
+    // Validate file size (500MB max - R2 supports up to 5GB)
+    const maxSize = 500 * 1024 * 1024;
     if (fileSize > maxSize) {
       return NextResponse.json(
-        { error: 'File quá lớn. Giới hạn tối đa là 50MB. Hãy nén video hoặc cắt thành đoạn ngắn hơn.' },
+        { error: 'File quá lớn. Giới hạn tối đa là 500MB.' },
         { status: 400 }
       );
     }
@@ -70,29 +70,13 @@ export async function POST(request: NextRequest) {
     const sanitizedFilename = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
     const storagePath = `${user.id}/${projectId}/${mediaFileId}-${sanitizedFilename}`;
 
-    // Create signed upload URL
-    const adminClient = createAdminClient();
-    
-    const { data: signedUrlData, error: signedUrlError } = await adminClient
-      .storage
-      .from('media')
-      .createSignedUploadUrl(storagePath, {
-        upsert: false,
-      });
-
-    if (signedUrlError || !signedUrlData) {
-      console.error('Signed URL error:', signedUrlError);
-      return NextResponse.json(
-        { error: 'Failed to create upload URL' },
-        { status: 500 }
-      );
-    }
+    // Create presigned upload URL from Cloudflare R2
+    const signedUrl = await createUploadUrl(storagePath, contentType, 7200); // 2 hours expiry
 
     return NextResponse.json({
-      signedUrl: signedUrlData.signedUrl,
+      signedUrl,
       storagePath,
       mediaFileId,
-      token: signedUrlData.token,
     });
 
   } catch (error) {

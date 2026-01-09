@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
+import { createDownloadUrl } from '@/lib/storage/r2';
 
 export async function GET(request: NextRequest) {
   try {
@@ -47,17 +48,24 @@ export async function GET(request: NextRequest) {
     const originalTrack = tracks?.find(t => t.track_type === 'original');
     const translatedTrack = tracks?.find(t => t.track_type === 'translated');
 
-    // Create signed URLs using admin client
     const adminClient = createAdminClient();
     const expiresIn = 3600; // 1 hour
 
-    // Media URL
-    const { data: mediaUrlData } = await adminClient
-      .storage
-      .from(mediaFile.storage_bucket)
-      .createSignedUrl(mediaFile.storage_path, expiresIn);
+    // Media URL - check if stored in R2 or Supabase
+    let mediaUrl = null;
+    if (mediaFile.storage_bucket === 'r2') {
+      // Use Cloudflare R2
+      mediaUrl = await createDownloadUrl(mediaFile.storage_path, expiresIn);
+    } else {
+      // Use Supabase Storage (legacy)
+      const { data: mediaUrlData } = await adminClient
+        .storage
+        .from(mediaFile.storage_bucket)
+        .createSignedUrl(mediaFile.storage_path, expiresIn);
+      mediaUrl = mediaUrlData?.signedUrl || null;
+    }
 
-    // Original track URL
+    // Original track URL (subtitles still in Supabase)
     let originalTrackUrl = null;
     if (originalTrack) {
       const { data: originalUrlData } = await adminClient
@@ -67,7 +75,7 @@ export async function GET(request: NextRequest) {
       originalTrackUrl = originalUrlData?.signedUrl || null;
     }
 
-    // Translated track URL
+    // Translated track URL (subtitles still in Supabase)
     let translatedTrackUrl = null;
     if (translatedTrack) {
       const { data: translatedUrlData } = await adminClient
@@ -78,7 +86,7 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      mediaUrl: mediaUrlData?.signedUrl || null,
+      mediaUrl,
       originalTrackUrl,
       translatedTrackUrl,
     });

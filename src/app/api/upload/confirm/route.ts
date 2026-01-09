@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createServerSupabaseClient } from '@/lib/supabase/server';
-import { createAdminClient } from '@/lib/supabase/admin';
 
 export async function POST(request: NextRequest) {
   try {
@@ -37,20 +36,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verify file exists in storage
-    const adminClient = createAdminClient();
-    
-    const { data: fileData, error: fileError } = await adminClient
-      .storage
-      .from('media')
-      .list(storagePath.substring(0, storagePath.lastIndexOf('/')), {
-        search: storagePath.substring(storagePath.lastIndexOf('/') + 1),
-      });
-
     // Determine media kind
     const kind = mimeType.startsWith('video/') ? 'video' : 'audio';
 
-    // Insert media file record
+    // Insert media file record (storage_bucket = 'r2' for Cloudflare R2)
     const { data: mediaFile, error: insertError } = await supabase
       .from('media_files')
       .insert({
@@ -61,7 +50,7 @@ export async function POST(request: NextRequest) {
         original_filename: filename,
         mime_type: mimeType,
         size_bytes: fileSize,
-        storage_bucket: 'media',
+        storage_bucket: 'r2',
         storage_path: storagePath,
       })
       .select()
